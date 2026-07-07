@@ -1,10 +1,7 @@
 /**
  * auto_quality.js
- * Forces max quality by intercepting the HLS playlist XHR request
- * on the main thread and rewriting the m3u8 to keep only the highest quality.
- * 
- * The Twitch TV app uses XMLHttpRequest (not fetch) on the main thread
- * to request quality playlists from usher.ttvnw.net.
+ * Forces max quality by intercepting the HLS master playlist XHR,
+ * fetching it separately, rewriting it, and substituting via a Blob URL.
  */
 
 import { showNotification } from './ui.js';
@@ -14,95 +11,131 @@ import { showNotification } from './ui.js';
   const _send = XMLHttpRequest.prototype.send;
 
   XMLHttpRequest.prototype.open = function (method, url, ...args) {
-    this.__tafUrl = url;
+    this.__tafUrl = typeof url === 'string' ? url : '';
+    this.__tafMethod = method;
     return _open.call(this, method, url, ...args);
   };
 
   XMLHttpRequest.prototype.send = function (...args) {
     const url = this.__tafUrl || '';
 
-    // Only intercept the master HLS playlist from usher (quality selection)
-    if (url && url.includes('usher.ttvnw.net/api/channel/hls/')) {
-      const xhr = this;
-      const originalOnReadyStateChange = xhr.onreadystatechange;
+    if (url.includes('usher.ttvnw.net/api/channel/hls/')) {
+      const origXhr = this;
 
-      Object.defineProperty(xhr, 'onreadystatechange', {
-        set(fn) { originalOnReadyStateChange = fn; },
-        get() { return originalOnReadyStateChange; }
-      });
+      // Abort the original request — we'll handle it ourselves
+      const proxyXhr = new XMLHttpRequest();
+      proxyXhr.__tafUrl = ''; // prevent recursive interception
 
-      xhr.addEventListener('readystatechange', function () {
-        if (xhr.readyState === 4 && xhr.status === 200) {
+      // Re-open with same URL but mark as proxy
+      _open.call(proxyXhr, this.__tafMethod || 'GET', url, true);
+
+      // Copy headers if any were set
+      try {
+        const origHeaders = origXhr.__tafHeaders || {};
+        Object.entries(origHeaders).forEach(([k, v]) => proxyXhr.setRequestHeader(k, v));
+      } catch (_) {}
+
+      proxyXhr.onload = function () {
+        if (proxyXhr.status === 200) {
           try {
-            const m3u8 = xhr.responseText;
-            const rewritten = keepOnlyMaxQuality(m3u8);
+            const rewritten = keepOnlyMaxQuality(proxyXhr.responseText);
+            const blob = new Blob([rewritten || proxyXhr.responseText], { type: 'application/vnd.apple.mpegurl' });
+            const blobUrl = URL.createObjectURL(blob);
 
-            if (rewritten && rewritten !== m3u8) {
-              // Override responseText with rewritten m3u8
-              Object.defineProperty(xhr, 'responseText', { value: rewritten, writable: false });
-              Object.defineProperty(xhr, 'response', { value: rewritten, writable: false });
-              console.log('[TAF] Auto-quality: rewrote m3u8 to max quality');
+            // Now redirect the original XHR to the blob
+            _open.call(origXhr, 'GET', blobUrl, true);
+            _send.call(origXhr);
 
-              // Show notification once
+            if (rewritten && rewritten !== proxyXhr.responseText) {
+              console.log('[TAF] Auto-quality: m3u8 rewritten to max quality');
               if (!window.__tafQualityNotified) {
                 window.__tafQualityNotified = true;
                 showNotification('🎬 Qualidade: Source (Máxima)', 3000, 'info');
-                // Reset flag on next stream
-                setTimeout(() => { window.__tafQualityNotified = false; }, 10000);
+                setTimeout(() => { window.__tafQualityNotified = false; }, 15000);
               }
+            } else {
+              // Rewrite failed or not a master playlist — use original response
+              _open.call(origXhr, 'GET', url, true);
+              _send.call(origXhr);
             }
           } catch (e) {
-            console.warn('[TAF] Auto-quality: m3u8 rewrite failed:', e);
+            console.warn('[TAF] Auto-quality rewrite error:', e);
+            // Fallback: load original URL normally
+            _open.call(origXhr, 'GET', url, true);
+            _send.call(origXhr);
           }
+        } else {
+          // Non-200 — pass through normally
+          _open.call(origXhr, 'GET', url, true);
+          _send.call(origXhr);
         }
-      });
+      };
+
+      proxyXhr.onerror = function () {
+        // Network error — fall through to original
+        _open.call(origXhr, 'GET', url, true);
+        _send.call(origXhr);
+      };
+
+      proxyXhr.send();
+      return; // Don't call original _send — we handle it above
     }
 
     return _send.call(this, ...args);
   };
 
-  console.log('[TAF] Auto-quality: XHR HLS interceptor active');
+  // Track setRequestHeader calls so we can replay them on the proxy XHR
+  const _setHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    if (!this.__tafHeaders) this.__tafHeaders = {};
+    this.__tafHeaders[k] = v;
+    return _setHeader.call(this, k, v);
+  };
+
+  console.log('[TAF] Auto-quality: XHR interceptor active');
 })();
 
 /**
- * Parse an HLS master playlist and return only the highest bandwidth stream.
- * @param {string} m3u8 - Original m3u8 content
- * @returns {string} - Rewritten m3u8 with only the top quality
+ * Parse HLS master playlist and keep only the highest bandwidth stream.
  */
 function keepOnlyMaxQuality(m3u8) {
+  if (!m3u8 || !m3u8.includes('#EXTM3U')) return null;
+
   const lines = m3u8.split('\n');
   const streams = [];
-  let i = 0;
 
-  while (i < lines.length) {
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (line.startsWith('#EXT-X-STREAM-INF')) {
-      const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
-      const bandwidth = bandwidthMatch ? parseInt(bandwidthMatch[1], 10) : 0;
-      const uri = lines[i + 1]?.trim();
+      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
+      const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+      const uri = (lines[i + 1] || '').trim();
       if (uri && !uri.startsWith('#')) {
         streams.push({ header: line, uri, bandwidth });
-        i += 2;
-        continue;
+        i++;
       }
     }
-    i++;
   }
 
-  if (streams.length === 0) return m3u8; // Not a master playlist
+  if (streams.length <= 1) return null; // Nothing to rewrite
 
-  // Sort by bandwidth descending, take the highest
   streams.sort((a, b) => b.bandwidth - a.bandwidth);
   const best = streams[0];
 
-  // Rebuild: keep all non-stream lines + only the best stream
-  const header = lines.filter(l => {
-    const t = l.trim();
-    return t.startsWith('#EXTM3U') ||
+  // Keep header lines + EXT-X-MEDIA + only best stream
+  const output = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (
+      t.startsWith('#EXTM3U') ||
       t.startsWith('#EXT-X-TWITCH') ||
-      t.startsWith('#EXT-X-MEDIA') ||
-      (t.startsWith('#EXT-X-STREAM-INF') && t === best.header);
-  });
+      t.startsWith('#EXT-X-MEDIA')
+    ) {
+      output.push(line);
+    }
+  }
+  output.push(best.header);
+  output.push(best.uri);
 
-  return [...header, best.header, best.uri].join('\n') + '\n';
+  return output.join('\n') + '\n';
 }

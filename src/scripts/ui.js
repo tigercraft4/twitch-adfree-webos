@@ -453,19 +453,26 @@ const eventHandler = (evt) => {
   return true;
 };
 
-export function showNotification(text, time = 7000, type = 'success') {
+export function showNotification(text, time = 3000, type = 'success') {
   if (!document.querySelector('.taf-notification-container')) {
     const c = document.createElement('div');
     c.classList.add('taf-notification-container');
     document.body.appendChild(c);
   }
 
+  const COLOR_MAP = {
+    success: 'rgba(50, 255, 50, 0.9)',
+    error: 'rgba(255, 50, 50, 0.9)',
+    info: 'rgba(0, 128, 255, 0.9)',
+  };
+
   const elm = document.createElement('div');
   const elmInner = document.createElement('div');
-  elmInner.innerHTML = text;
+  elmInner.innerText = text;
   elmInner.classList.add('message');
   elmInner.classList.add('message-hidden');
   elmInner.classList.add(`message-${type}`);
+  elmInner.style.borderRightColor = COLOR_MAP[type] || COLOR_MAP.success;
   elm.appendChild(elmInner);
   document.querySelector('.taf-notification-container').appendChild(elm);
 

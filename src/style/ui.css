@@ -159,7 +159,7 @@
 }
 
 .taf-notification-container {
-  position: absolute;
+  position: fixed;
   right: 10px;
   bottom: 10px;
   font-size: 16pt;
@@ -174,19 +174,22 @@
   transition: all 0.3s ease-in-out;
   opacity: 1;
   line-height: 1;
+  border-right: 10px solid rgba(50, 255, 50, 0.3);
+  display: inline-block;
   float: right;
+  clear: both;
 }
 
 .taf-notification-container .message-success {
-  border-right: 10px solid rgba(50, 255, 50, 0.3);
+  border-right-color: rgba(50, 255, 50, 0.9);
 }
 
 .taf-notification-container .message-error {
-  border-right: 10px solid rgba(255, 50, 50, 0.4);
+  border-right-color: rgba(255, 50, 50, 0.9);
 }
 
 .taf-notification-container .message-info {
-  border-right: 10px solid rgba(50, 150, 255, 0.4);
+  border-right-color: rgba(0, 128, 255, 0.9);
 }
 
 .taf-notification-container .message-hidden {

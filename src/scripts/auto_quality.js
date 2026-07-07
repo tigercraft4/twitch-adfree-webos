@@ -1,180 +1,99 @@
 /**
  * auto_quality.js
- * Forces maximum quality using the Twitch internal player API,
- * the same way the YouTube app does it — no DOM clicking required.
+ * Forces maximum quality via three methods:
+ * 1. localStorage proxy — intercepts reads/writes before player init
+ * 2. Worker postMessage hook — catches quality messages between player and worker
+ * 3. Notification when stream starts
  */
 
 import { showNotification } from './ui.js';
 
-/**
- * Get the Twitch internal player object via React fiber.
- * Twitch renders its player as a React component — the internal API
- * is accessible via the React fiber props on the video wrapper element.
- */
-function getTwitchPlayer() {
-  // Look for the video element and walk up the React fiber tree
-  const videoEl = document.querySelector('video');
-  if (!videoEl) return null;
+const QUALITY_KEY = 'video-quality';
+const MAX_QUALITY_VALUE = JSON.stringify({ default: 'chunked' });
 
-  // Find the React fiber root key (React attaches it as __reactFiber$ or __reactInternalInstance$)
-  const fiberKey = Object.keys(videoEl).find(
-    (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
-  );
-  if (!fiberKey) return null;
+// ─── Method 1: localStorage proxy ────────────────────────────────────────────
+// The Twitch player reads video-quality from localStorage on init.
+// We intercept ALL reads to always return 'chunked' (Source).
+(function proxyLocalStorage() {
+  const _getItem = Storage.prototype.getItem;
+  const _setItem = Storage.prototype.setItem;
 
-  let fiber = videoEl[fiberKey];
-
-  // Walk up the fiber tree looking for a node with player API methods
-  let limit = 100;
-  while (fiber && limit-- > 0) {
-    const player =
-      fiber?.memoizedProps?.player ||
-      fiber?.memoizedState?.player ||
-      fiber?.pendingProps?.player;
-
-    if (player && typeof player.setQuality === 'function') {
-      return player;
+  Storage.prototype.getItem = function (key) {
+    if (key === QUALITY_KEY) {
+      return MAX_QUALITY_VALUE;
     }
+    return _getItem.call(this, key);
+  };
 
-    // Also try stateNode for class components
-    const statePlayer = fiber?.stateNode?.player;
-    if (statePlayer && typeof statePlayer.setQuality === 'function') {
-      return statePlayer;
+  Storage.prototype.setItem = function (key, value) {
+    if (key === QUALITY_KEY) {
+      // Block player from persisting any lower quality
+      return _setItem.call(this, key, MAX_QUALITY_VALUE);
     }
+    return _setItem.call(this, key, value);
+  };
 
-    fiber = fiber.return;
-  }
+  // Pre-seed the value
+  try { _setItem.call(localStorage, QUALITY_KEY, MAX_QUALITY_VALUE); } catch (_) {}
 
-  return null;
-}
+  console.log('[TAF] Auto-quality: localStorage proxy active');
+})();
 
-/**
- * Get the Twitch player via the global mediaplayer registry (alternative path).
- * Twitch exposes this on some versions via window.Twitch or internal modules.
- */
-function getTwitchPlayerFallback() {
-  // Try the internal player registry that Twitch uses
-  const playerEl = document.querySelector('[data-a-target="player-overlay-click-handler"]');
-  if (!playerEl) return null;
+// ─── Method 2: Worker postMessage hook ───────────────────────────────────────
+// The Twitch player communicates quality via postMessage to its worker.
+// We intercept outgoing messages and force quality to 'chunked'.
+(function hookWorkerMessages() {
+  const _Worker = window.Worker;
 
-  const fiberKey = Object.keys(playerEl).find(
-    (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
-  );
-  if (!fiberKey) return null;
+  window.Worker = class extends _Worker {
+    constructor(...args) {
+      super(...args);
 
-  let fiber = playerEl[fiberKey];
-  let limit = 200;
+      const _postMessage = this.postMessage.bind(this);
 
-  while (fiber && limit-- > 0) {
-    const props = fiber?.memoizedProps;
-    if (props?.mediaPlayerInstance && typeof props.mediaPlayerInstance.setQuality === 'function') {
-      return props.mediaPlayerInstance;
+      this.postMessage = function (msg, ...rest) {
+        // Twitch sends quality as { type: 'setQuality', data: { quality: '...' } }
+        // or similar structures — force to chunked
+        if (msg && typeof msg === 'object') {
+          if (msg.type === 'setQuality' || msg.type === 'SET_QUALITY') {
+            msg = { ...msg, data: { ...(msg.data || {}), quality: 'chunked' } };
+          }
+          // Also check for encoded quality in the payload
+          if (msg.quality && msg.quality !== 'chunked') {
+            msg = { ...msg, quality: 'chunked' };
+          }
+        }
+        return _postMessage(msg, ...rest);
+      };
     }
-    if (props?.player && typeof props.player.setQuality === 'function') {
-      return props.player;
-    }
-    fiber = fiber.return;
-  }
+  };
 
-  return null;
-}
+  console.log('[TAF] Auto-quality: Worker postMessage hook active');
+})();
 
-/**
- * Apply max quality using the internal player API.
- */
-async function applyMaxQuality() {
-  const player = getTwitchPlayer() || getTwitchPlayerFallback();
-
-  if (player) {
-    try {
-      // Get available qualities — returns array sorted highest first
-      const qualities = player.getQualities?.() || [];
-      const maxQuality = qualities[0];
-
-      if (maxQuality) {
-        player.setQuality(maxQuality.group || maxQuality.name || maxQuality.id);
-        const label = maxQuality.name || maxQuality.group || 'Máxima';
-        showNotification(`🎬 Qualidade: ${label}`, 4000, 'info');
-        console.log('[TAF] Auto-quality via API: set to', label);
-        return true;
-      }
-    } catch (e) {
-      console.warn('[TAF] Player API setQuality failed:', e);
-    }
-  }
-
-  // Fallback: interact with the DOM settings menu
-  return await applyMaxQualityViaMenu();
-}
-
-/**
- * Fallback: open player menu → Quality → click top option.
- */
-async function applyMaxQualityViaMenu() {
-  const settingsBtn = document.querySelector('[data-a-target="player-settings-button"]');
-  if (!settingsBtn) return false;
-
-  settingsBtn.click();
-  await sleep(600);
-
-  const qualityItem = document.querySelector('[data-a-target="player-settings-menu-item-quality"]');
-  if (!qualityItem) { closeMenu(); return false; }
-
-  qualityItem.click();
-  await sleep(600);
-
-  const options = document.querySelectorAll('[data-a-target="player-settings-submenu-quality-option"]');
-  if (options.length === 0) { closeMenu(); return false; }
-
-  const label = options[0].textContent?.trim() || 'Máxima';
-  options[0].click();
-
-  await sleep(300);
-  const btn = document.querySelector('[data-a-target="player-settings-button"]');
-  if (btn) btn.click();
-
-  showNotification(`🎬 Qualidade: ${label}`, 4000, 'info');
-  console.log('[TAF] Auto-quality via menu: set to', label);
-  return true;
-}
-
-function closeMenu() {
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Watch for stream changes and apply max quality.
- */
-function initAutoQuality() {
+// ─── Method 3: Stream notification ───────────────────────────────────────────
+// Show a notification whenever a new stream loads.
+(function watchStream() {
   let lastSrc = null;
-  let pending = false;
+  let notified = false;
 
   const observer = new MutationObserver(() => {
     const video = document.querySelector('video');
-    if (!video || pending) return;
+    if (!video) return;
 
     if (video.src && video.src !== lastSrc) {
       lastSrc = video.src;
-      pending = true;
+      notified = false;
 
-      // Wait for player to fully load before applying quality
-      setTimeout(async () => {
-        await applyMaxQuality();
-        pending = false;
-      }, 3000);
+      setTimeout(() => {
+        if (!notified) {
+          showNotification('🎬 Qualidade: Source (Máxima)', 3000, 'info');
+          notified = true;
+        }
+      }, 3500);
     }
   });
 
   observer.observe(document.body, { childList: true, subtree: true });
-  console.log('[TAF] Auto-quality initialized (API + menu fallback)');
-}
-
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initAutoQuality);
-} else {
-  initAutoQuality();
-}
+  console.log('[TAF] Auto-quality: stream watcher active');
+})();

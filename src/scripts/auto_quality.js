@@ -1,119 +1,123 @@
 /**
  * auto_quality.js
  * Automatically selects the highest available quality when a stream starts.
- * Uses MutationObserver to detect quality buttons in the Twitch player UI.
+ * Opens the player settings menu, navigates to quality, clicks the top option,
+ * then closes the menu — so the player actually registers the change.
  */
 
 import { showNotification } from './ui.js';
 
-// Twitch stores quality preference in localStorage under this key
-const TWITCH_QUALITY_KEY = 'video-quality';
+// Twitch player UI selectors
+const SETTINGS_BTN = '[data-a-target="player-settings-button"]';
+const QUALITY_MENU_ITEM = '[data-a-target="player-settings-menu-item-quality"]';
+const QUALITY_OPTION = '[data-a-target="player-settings-submenu-quality-option"]';
 
 /**
- * Force the highest quality by setting localStorage and clicking the button.
- * Called whenever the quality menu appears in the DOM.
+ * Open settings → Quality → click highest option → close menu.
+ * Returns the quality label selected, or null if failed.
  */
-function forceMaxQuality() {
-  // Set localStorage so Twitch remembers "auto" pointing to highest quality
-  try {
-    const stored = localStorage.getItem(TWITCH_QUALITY_KEY);
-    const current = stored ? JSON.parse(stored) : {};
+async function selectMaxQualityViaMenu() {
+  // 1. Click settings gear
+  const settingsBtn = document.querySelector(SETTINGS_BTN);
+  if (!settingsBtn) return null;
+  settingsBtn.click();
 
-    // Only override if not already set to chunked (source) or 1440p+
-    const topQualities = ['chunked', '1440p60', '1080p60'];
-    if (!topQualities.includes(current?.default)) {
-      localStorage.setItem(
-        TWITCH_QUALITY_KEY,
-        JSON.stringify({ default: 'chunked' })
-      );
-    }
-  } catch (e) {
-    console.warn('[TAF] Could not set quality in localStorage:', e);
+  await sleep(600);
+
+  // 2. Click "Quality" submenu item
+  const qualityItem = document.querySelector(QUALITY_MENU_ITEM);
+  if (!qualityItem) {
+    closeMenu();
+    return null;
+  }
+  qualityItem.click();
+
+  await sleep(600);
+
+  // 3. Click the first (highest) quality option
+  const options = document.querySelectorAll(QUALITY_OPTION);
+  if (options.length === 0) {
+    closeMenu();
+    return null;
   }
 
-  // Also click the quality button in the UI if the menu is open
-  clickMaxQualityButton();
+  const label = options[0].textContent?.trim() || 'Máxima';
+  options[0].click();
+
+  await sleep(300);
+
+  // 4. Close the settings menu by clicking the gear again
+  const settingsBtnAfter = document.querySelector(SETTINGS_BTN);
+  if (settingsBtnAfter) settingsBtnAfter.click();
+
+  return label;
 }
 
 /**
- * Finds and clicks the highest available quality option in the player menu.
+ * Close any open menu by pressing Escape.
  */
-function clickMaxQualityButton() {
-  // Quality options appear inside a menu — find all radio/button quality items
-  // Twitch uses data-a-target="player-settings-submenu-quality-option" or similar
-  const qualityItems = document.querySelectorAll(
-    '[data-a-target="player-settings-submenu-quality-option"]'
-  );
+function closeMenu() {
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+}
 
-  if (qualityItems.length > 0) {
-    // First item is always the highest quality (Source / 1440p / 1080p)
-    const label = qualityItems[0].textContent?.trim() || 'Máxima';
-    qualityItems[0].click();
-    console.log('[TAF] Auto-quality: selected', label);
+/**
+ * Simple sleep helper.
+ */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Main: wait for the video to be playing, then select max quality.
+ */
+async function applyMaxQuality() {
+  const label = await selectMaxQualityViaMenu();
+
+  if (label) {
     showNotification(`🎬 Qualidade: ${label}`, 4000, 'info');
-    return;
-  }
-
-  // Fallback: look for radio inputs inside quality menu
-  const radioItems = document.querySelectorAll(
-    '[data-a-target="player-settings-submenu"] input[type="radio"]'
-  );
-  if (radioItems.length > 0) {
-    radioItems[0].click();
-    showNotification('🎬 Qualidade máxima seleccionada', 4000, 'info');
-    console.log('[TAF] Auto-quality: selected via radio fallback');
+    console.log('[TAF] Auto-quality: selected', label);
+  } else {
+    // Fallback: set via localStorage so Twitch picks it up on next load
+    try {
+      localStorage.setItem('video-quality', JSON.stringify({ default: 'chunked' }));
+      console.log('[TAF] Auto-quality: set via localStorage fallback');
+    } catch (e) {
+      console.warn('[TAF] localStorage fallback failed:', e);
+    }
   }
 }
 
 /**
- * Watch for the player to load a new stream and trigger quality selection.
- * Twitch re-renders the video element on each channel switch.
+ * Watch for stream changes (new video src) and trigger quality selection.
  */
 function initAutoQuality() {
   let lastSrc = null;
-  let qualitySetForCurrentStream = false;
+  let pending = false;
 
-  // Set quality preference in localStorage immediately on load
-  forceMaxQuality();
-
-  // Watch for video src changes (new stream) and quality menu appearances
   const observer = new MutationObserver(() => {
     const video = document.querySelector('video');
+    if (!video || pending) return;
 
-    if (video && video.src !== lastSrc) {
+    if (video.src && video.src !== lastSrc) {
       lastSrc = video.src;
-      qualitySetForCurrentStream = false;
+      pending = true;
 
-      // Give the player a moment to render the UI, then try to set quality
-      setTimeout(() => {
-        if (!qualitySetForCurrentStream) {
-          forceMaxQuality();
-          qualitySetForCurrentStream = true;
-          showNotification('🎬 Qualidade máxima activada', 4000, 'info');
-        }
-      }, 2000);
-    }
-
-    // Also react if quality menu opens (user or auto-triggered)
-    const qualityMenu = document.querySelector(
-      '[data-a-target="player-settings-submenu-quality-option"]'
-    );
-    if (qualityMenu && !qualitySetForCurrentStream) {
-      forceMaxQuality();
-      qualitySetForCurrentStream = true;
+      // Wait for player controls to render before interacting
+      setTimeout(async () => {
+        await applyMaxQuality();
+        pending = false;
+      }, 3000);
     }
   });
 
   observer.observe(document.body, {
     childList: true,
-    subtree: true,
-    attributes: false
+    subtree: true
   });
 
-  console.log('[TAF] Auto-quality initialized — will select highest quality on stream load');
+  console.log('[TAF] Auto-quality initialized');
 }
 
-// Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initAutoQuality);
 } else {

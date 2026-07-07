@@ -1,94 +1,153 @@
 /**
  * auto_quality.js
- * Automatically selects the highest available quality when a stream starts.
- * Opens the player settings menu, navigates to quality, clicks the top option,
- * then closes the menu — so the player actually registers the change.
+ * Forces maximum quality using the Twitch internal player API,
+ * the same way the YouTube app does it — no DOM clicking required.
  */
 
 import { showNotification } from './ui.js';
 
-// Twitch player UI selectors
-const SETTINGS_BTN = '[data-a-target="player-settings-button"]';
-const QUALITY_MENU_ITEM = '[data-a-target="player-settings-menu-item-quality"]';
-const QUALITY_OPTION = '[data-a-target="player-settings-submenu-quality-option"]';
+/**
+ * Get the Twitch internal player object via React fiber.
+ * Twitch renders its player as a React component — the internal API
+ * is accessible via the React fiber props on the video wrapper element.
+ */
+function getTwitchPlayer() {
+  // Look for the video element and walk up the React fiber tree
+  const videoEl = document.querySelector('video');
+  if (!videoEl) return null;
+
+  // Find the React fiber root key (React attaches it as __reactFiber$ or __reactInternalInstance$)
+  const fiberKey = Object.keys(videoEl).find(
+    (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+  );
+  if (!fiberKey) return null;
+
+  let fiber = videoEl[fiberKey];
+
+  // Walk up the fiber tree looking for a node with player API methods
+  let limit = 100;
+  while (fiber && limit-- > 0) {
+    const player =
+      fiber?.memoizedProps?.player ||
+      fiber?.memoizedState?.player ||
+      fiber?.pendingProps?.player;
+
+    if (player && typeof player.setQuality === 'function') {
+      return player;
+    }
+
+    // Also try stateNode for class components
+    const statePlayer = fiber?.stateNode?.player;
+    if (statePlayer && typeof statePlayer.setQuality === 'function') {
+      return statePlayer;
+    }
+
+    fiber = fiber.return;
+  }
+
+  return null;
+}
 
 /**
- * Open settings → Quality → click highest option → close menu.
- * Returns the quality label selected, or null if failed.
+ * Get the Twitch player via the global mediaplayer registry (alternative path).
+ * Twitch exposes this on some versions via window.Twitch or internal modules.
  */
-async function selectMaxQualityViaMenu() {
-  // 1. Click settings gear
-  const settingsBtn = document.querySelector(SETTINGS_BTN);
-  if (!settingsBtn) return null;
+function getTwitchPlayerFallback() {
+  // Try the internal player registry that Twitch uses
+  const playerEl = document.querySelector('[data-a-target="player-overlay-click-handler"]');
+  if (!playerEl) return null;
+
+  const fiberKey = Object.keys(playerEl).find(
+    (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+  );
+  if (!fiberKey) return null;
+
+  let fiber = playerEl[fiberKey];
+  let limit = 200;
+
+  while (fiber && limit-- > 0) {
+    const props = fiber?.memoizedProps;
+    if (props?.mediaPlayerInstance && typeof props.mediaPlayerInstance.setQuality === 'function') {
+      return props.mediaPlayerInstance;
+    }
+    if (props?.player && typeof props.player.setQuality === 'function') {
+      return props.player;
+    }
+    fiber = fiber.return;
+  }
+
+  return null;
+}
+
+/**
+ * Apply max quality using the internal player API.
+ */
+async function applyMaxQuality() {
+  const player = getTwitchPlayer() || getTwitchPlayerFallback();
+
+  if (player) {
+    try {
+      // Get available qualities — returns array sorted highest first
+      const qualities = player.getQualities?.() || [];
+      const maxQuality = qualities[0];
+
+      if (maxQuality) {
+        player.setQuality(maxQuality.group || maxQuality.name || maxQuality.id);
+        const label = maxQuality.name || maxQuality.group || 'Máxima';
+        showNotification(`🎬 Qualidade: ${label}`, 4000, 'info');
+        console.log('[TAF] Auto-quality via API: set to', label);
+        return true;
+      }
+    } catch (e) {
+      console.warn('[TAF] Player API setQuality failed:', e);
+    }
+  }
+
+  // Fallback: interact with the DOM settings menu
+  return await applyMaxQualityViaMenu();
+}
+
+/**
+ * Fallback: open player menu → Quality → click top option.
+ */
+async function applyMaxQualityViaMenu() {
+  const settingsBtn = document.querySelector('[data-a-target="player-settings-button"]');
+  if (!settingsBtn) return false;
+
   settingsBtn.click();
-
   await sleep(600);
 
-  // 2. Click "Quality" submenu item
-  const qualityItem = document.querySelector(QUALITY_MENU_ITEM);
-  if (!qualityItem) {
-    closeMenu();
-    return null;
-  }
+  const qualityItem = document.querySelector('[data-a-target="player-settings-menu-item-quality"]');
+  if (!qualityItem) { closeMenu(); return false; }
+
   qualityItem.click();
-
   await sleep(600);
 
-  // 3. Click the first (highest) quality option
-  const options = document.querySelectorAll(QUALITY_OPTION);
-  if (options.length === 0) {
-    closeMenu();
-    return null;
-  }
+  const options = document.querySelectorAll('[data-a-target="player-settings-submenu-quality-option"]');
+  if (options.length === 0) { closeMenu(); return false; }
 
   const label = options[0].textContent?.trim() || 'Máxima';
   options[0].click();
 
   await sleep(300);
+  const btn = document.querySelector('[data-a-target="player-settings-button"]');
+  if (btn) btn.click();
 
-  // 4. Close the settings menu by clicking the gear again
-  const settingsBtnAfter = document.querySelector(SETTINGS_BTN);
-  if (settingsBtnAfter) settingsBtnAfter.click();
-
-  return label;
+  showNotification(`🎬 Qualidade: ${label}`, 4000, 'info');
+  console.log('[TAF] Auto-quality via menu: set to', label);
+  return true;
 }
 
-/**
- * Close any open menu by pressing Escape.
- */
 function closeMenu() {
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
 }
 
-/**
- * Simple sleep helper.
- */
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * Main: wait for the video to be playing, then select max quality.
- */
-async function applyMaxQuality() {
-  const label = await selectMaxQualityViaMenu();
-
-  if (label) {
-    showNotification(`🎬 Qualidade: ${label}`, 4000, 'info');
-    console.log('[TAF] Auto-quality: selected', label);
-  } else {
-    // Fallback: set via localStorage so Twitch picks it up on next load
-    try {
-      localStorage.setItem('video-quality', JSON.stringify({ default: 'chunked' }));
-      console.log('[TAF] Auto-quality: set via localStorage fallback');
-    } catch (e) {
-      console.warn('[TAF] localStorage fallback failed:', e);
-    }
-  }
-}
-
-/**
- * Watch for stream changes (new video src) and trigger quality selection.
+ * Watch for stream changes and apply max quality.
  */
 function initAutoQuality() {
   let lastSrc = null;
@@ -102,7 +161,7 @@ function initAutoQuality() {
       lastSrc = video.src;
       pending = true;
 
-      // Wait for player controls to render before interacting
+      // Wait for player to fully load before applying quality
       setTimeout(async () => {
         await applyMaxQuality();
         pending = false;
@@ -110,12 +169,8 @@ function initAutoQuality() {
     }
   });
 
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
-  });
-
-  console.log('[TAF] Auto-quality initialized');
+  observer.observe(document.body, { childList: true, subtree: true });
+  console.log('[TAF] Auto-quality initialized (API + menu fallback)');
 }
 
 if (document.readyState === 'loading') {

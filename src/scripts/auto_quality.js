@@ -4,6 +4,8 @@
  * Uses MutationObserver to detect quality buttons in the Twitch player UI.
  */
 
+import { showNotification } from './ui.js';
+
 // Twitch stores quality preference in localStorage under this key
 const TWITCH_QUALITY_KEY = 'video-quality';
 
@@ -45,11 +47,10 @@ function clickMaxQualityButton() {
 
   if (qualityItems.length > 0) {
     // First item is always the highest quality (Source / 1440p / 1080p)
+    const label = qualityItems[0].textContent?.trim() || 'Máxima';
     qualityItems[0].click();
-    console.log(
-      '[TAF] Auto-quality: selected',
-      qualityItems[0].textContent?.trim()
-    );
+    console.log('[TAF] Auto-quality: selected', label);
+    showNotification(`🎬 Qualidade: ${label}`, 4000, 'info');
     return;
   }
 
@@ -59,6 +60,7 @@ function clickMaxQualityButton() {
   );
   if (radioItems.length > 0) {
     radioItems[0].click();
+    showNotification('🎬 Qualidade máxima seleccionada', 4000, 'info');
     console.log('[TAF] Auto-quality: selected via radio fallback');
   }
 }
@@ -87,6 +89,7 @@ function initAutoQuality() {
         if (!qualitySetForCurrentStream) {
           forceMaxQuality();
           qualitySetForCurrentStream = true;
+          showNotification('🎬 Qualidade máxima activada', 4000, 'info');
         }
       }, 2000);
     }

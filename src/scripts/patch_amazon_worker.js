@@ -31,6 +31,11 @@ let resolutions = {
     bandwidth: 8438581,
     fps: 60
   },
+  '1440p60': {
+    res: '2560x1440',
+    bandwidth: 12000000,
+    fps: 60
+  },
   chunked: {
     res: '1920x1080',
     bandwidth: 5145876,
@@ -130,12 +135,12 @@ self.fetch = async function (input, opt) {
     return;
   }
 
-  // Redirect HLS playlist requests to luminous.dev
+  // Redirect HLS playlist requests through a proxy to remove ads
   if (
     url.includes('.m3u8') &&
     url.includes('usher.ttvnw.net/api/channel/hls/')
   ) {
-    // Check if luminous playback is enabled in config
+    // Check if proxy is enabled in config
     try {
       // Note: useProxy defined in twitch_no_sub.js as this worker cannot access config directly
       // eslint-disable-next-line no-undef
@@ -148,24 +153,53 @@ self.fetch = async function (input, opt) {
 
         if (channelMatch && channelMatch[1]) {
           const channel = channelMatch[1];
-          const proxyUrlTemplate =
-            // Note: proxyUrl defined in twitch_no_sub.js as this worker cannot access config directly
-            // eslint-disable-next-line no-undef
-            proxyUrl ||
-            'https://as.luminous.dev/live/$channel?allow_source=true&allow_audio_only=true&fast_bread=true';
-          const newUrl = proxyUrlTemplate.replace('$channel', channel);
 
-          // Reconstruct Request if needed
-          if (input instanceof Request) {
-            input = new Request(newUrl, input);
+          // Note: proxyUrl defined in twitch_no_sub.js as this worker cannot access config directly
+          // eslint-disable-next-line no-undef
+          const customProxy = proxyUrl;
+
+          // Fallback proxy list — tried in order if the primary is unavailable
+          const proxyList = [
+            customProxy ||
+              'https://as.luminous.dev/live/$channel?allow_source=true&allow_audio_only=true&fast_bread=true',
+            'https://eu.luminous.dev/live/$channel?allow_source=true&allow_audio_only=true&fast_bread=true',
+            'https://lb-eu.cdn-perfprod.com/live/$channel?allow_source=true&allow_audio_only=true&fast_bread=true',
+            'https://lb-na.cdn-perfprod.com/live/$channel?allow_source=true&allow_audio_only=true&fast_bread=true'
+          ];
+
+          let proxyResponse = null;
+
+          for (const template of proxyList) {
+            const proxyUrl = template.replace('$channel', channel);
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              const testResp = await oldFetch(proxyUrl, { method: 'HEAD' });
+              if (testResp.ok || testResp.status === 200) {
+                const newUrl = proxyUrl;
+                proxyResponse = newUrl;
+                break;
+              }
+            } catch (_e) {
+              // Try next proxy
+              console.warn('[TAF] Proxy unavailable, trying next:', proxyUrl);
+            }
+          }
+
+          if (proxyResponse) {
+            if (input instanceof Request) {
+              input = new Request(proxyResponse, input);
+            } else {
+              input = proxyResponse;
+            }
           } else {
-            input = newUrl;
+            // All proxies failed — fall through to original Twitch URL
+            console.warn('[TAF] All proxies failed, using original Twitch URL');
           }
         }
       }
     } catch (e) {
       // Silently fail if config reading fails
-      console.warn('Failed to read config for luminous playback', e);
+      console.warn('Failed to read config for proxy playback', e);
     }
   }
 

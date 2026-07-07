@@ -1,10 +1,10 @@
 {
-  "id": "twitch.adamffdev.v1",
+  "id": "twitch.tigercraft4.v1",
   "version": "1.6.3",
-  "vendor": "webosbrew.org",
+  "vendor": "tigercraft4",
   "type": "web",
   "main": "index.html",
-  "title": "Twitch AdFree",
+  "title": "Twitch TC4",
   "icon": "icon.png",
   "splashBackground": "splash.png",
   "largeIcon": "largeIcon.png",
